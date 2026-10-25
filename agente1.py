@@ -1,6 +1,6 @@
 # ===========================================================================
 # AGENTE 1 — Extração determinística de execuções fiscais (PGMS / HERA)
-# Versão 8.2.2
+# Versão 8.2.3
 #
 # MUDANÇAS EM RELAÇÃO A promptV7_1.py:
 #   1. [feedback 4] Removida a camada de juízo APTO / NÃO APTO. O Agente 1
@@ -175,6 +175,18 @@
 #  14. [FIX] numero_cda no formato SEM pontos ("Certidão de Débito nº
 #      12007192406", 11 dígitos corridos) não era reconhecido e saía vazio.
 #      Mesmo código da rama ia. Os formatos já suportados não mudam.
+#
+# MUDANÇAS EM RELAÇÃO A v8.2.2 (Versão 8.2.3):
+#
+#  15. [FIX — regressão da v8.0.3, commit 6031424] extract_citacion() perdeu o
+#      retorno final "Citação não encontrado" e passou a devolver None quando
+#      não havia nenhum indício de citação. Efeito: JSON com status_citacao
+#      null e planilha com "Não especificado", sem distinguir "procurado e não
+#      encontrado" de "não extraído". O retorno foi restaurado; a saída volta a
+#      ser a mesma da v8.0 que está no cliente. Teste:
+#      tests/test_regressao_v8_2_3.py.
+#  16. [FIX] VERSION_AGENTE1 gravava "8.2.1" no JSON mesmo na v8.2.2. Agora
+#      acompanha o cabeçalho ("8.2.3").
 # ===========================================================================
 
 import json
@@ -914,6 +926,10 @@ def extract_citacion(text):
 
     if tem_ok_regex or any(normalizar(k) in text_norm for k in KEYWORDS_CITACION_OK):
         return "HOUVE CITAÇÃO"
+
+    # [v8.2.3] Restaurado: este retorno se perdeu na v8.0.3 e a função passou
+    # a devolver None. Ver item 15 do cabeçalho.
+    return "Citação não encontrado"
 
 
 # 5. Extraer resultado de la penhora
@@ -3120,7 +3136,7 @@ def exportar_json_agente2(prompts, output_json, total_ignorados=None):
     import json
     from datetime import datetime as _dt
 
-    VERSION_AGENTE1 = "8.2.1"
+    VERSION_AGENTE1 = "8.2.3"
 
     def _nulo(val):
         if val is None:
