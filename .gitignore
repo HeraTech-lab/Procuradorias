@@ -3,7 +3,7 @@
 __pycache__/
 *.pyc
 .DS_Store
-
+proc/
 # Dados de entrada e saídas geradas
 processos pra analiser/*.pdf
 JSON/
