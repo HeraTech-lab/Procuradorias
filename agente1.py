@@ -1,6 +1,6 @@
 # ===========================================================================
 # AGENTE 1 — Extração determinística de execuções fiscais (PGMS / HERA)
-# Versão 8.2.3
+# Versão 8.2.5
 #
 # MUDANÇAS EM RELAÇÃO A promptV7_1.py:
 #   1. [feedback 4] Removida a camada de juízo APTO / NÃO APTO. O Agente 1
@@ -187,6 +187,57 @@
 #      tests/test_regressao_v8_2_3.py.
 #  16. [FIX] VERSION_AGENTE1 gravava "8.2.1" no JSON mesmo na v8.2.2. Agora
 #      acompanha o cabeçalho ("8.2.3").
+#
+# MUDANÇAS EM RELAÇÃO A v8.2.3 (Versão 8.2.4):
+#
+#  17. [FIX — PDF real 0014528-66.1996.8.05.0001, 285 págs.] nome_exequente e
+#      nome_executado saíam lixo: exequente = "Executado:" e executado = uma
+#      frase de despacho ("nossas homenagens e as garantias de estilo"). Causa:
+#      numa capa antiga com rótulos EMPILHADOS ("Exequente:\nExecutado:\n
+#      <texto>"), o padrão "rótulo\s*:\s*(...)" atravessava a quebra de linha
+#      e capturava a linha seguinte; e só a 1ª ocorrência do rótulo era
+#      testada. Agora (_buscar_nome_parte / _limpar_nome_parte):
+#        - o valor tem de estar na MESMA LINHA do rótulo;
+#        - percorre TODAS as ocorrências até achar um valor válido;
+#        - remove rótulo encaixado do PJe ("EXEQUENTE: AUTOR: X" -> "X");
+#        - corta no próximo rótulo de parte/advogado e em CPF/CNPJ/OAB colados
+#          ao nome ("MUNICIPIO X CNPJ: ..." -> "MUNICIPIO X");
+#        - descarta valor que é só rótulo, só dígitos ou curto demais.
+#      Demais campos idênticos à v8.2.3 no PDF real e nos PDFs fictícios.
+#      Teste: tests/test_nomes_partes_v8_2_4.py.
+#  18. [NOVO — decisão do usuário 28/10/2026: "opção B"] Nesse mesmo PDF o PJe
+#      registrou os polos INVERTIDOS (EXEQUENTE: a empresa / EXECUTADO: o
+#      Município), embora a sentença diga que o Município é quem executa. O
+#      Agente 1 continua reproduzindo o que o PJe diz e NÃO troca os polos —
+#      só SINALIZA. Novo campo (ADITIVO) "alertas": lista de
+#      {"codigo", "mensagem"}; código POLOS_A_REVISAR quando o executado é um
+#      ente cadastrado em exequentes.json (reconhecido pela localidade:
+#      "Município de Salvador" casa "PREFEITURA MUNICIPAL DE SALVADOR",
+#      "Município do Salvador" etc.). None = etapa 'entidades' não processada;
+#      [] = nada a revisar. Também: coluna "Alertas" na planilha, aviso no log
+#      e na saída do terminal. É DERIVADO das entidades finais (pós-merge),
+#      então nunca contradiz os nomes gravados no JSON.
+#      O Agente 2 e o painel (webapp.py) ainda NÃO leem este campo.
+#
+# MUDANÇAS EM RELAÇÃO A v8.2.4 (Versão 8.2.5) — mesmo PDF real:
+#
+#  19. [FIX] valor_atualizado saía "R$ ,": nos fallbacks de _extrair_valor o
+#      número era ([\d.,]+), que aceita uma vírgula sozinha. Agora os
+#      fallbacks exigem valor em reais com centavos (_NUM: "1.234,56",
+#      "6019,02"). Efeitos colaterais: ponto final colado ("R$ 1.234,56.") sai
+#      do valor; valor SEM centavos ("R$ 1.500") deixa de ser capturado pelos
+#      fallbacks. A fonte primária (Certidões de Débito) não muda.
+#  20. [FIX] resultado_penhora: o PEDIDO "penhora de veículo ... via RENAJUD"
+#      virava "bloqueio renajud ativo" e escondia o bloqueio SISBAJUD efetivo
+#      (era o "risco conhecido não corrigido" anotado na v8.0.3; este é o 1º
+#      caso real). "penhora de veiculo" saiu de KEYWORDS_RENAJUD_ATIVO e foi
+#      para o novo KEYWORDS_RENAJUD_SOLICITADO ("renajud solicitado (resultado
+#      desconhecido)"), avaliado só depois de todos os resultados efetivos.
+#      Nova confirmação SISBAJUD: "(01) cumprida" (código de resposta do
+#      relatório de detalhamento do SISBAJUD).
+#  21. [FIX] ultima_movimentacao ignorava a data do fecho padrão do PJe
+#      ("SALVADOR - REGIÃO METROPOLITANA/BA, <data>") quando o título do ato
+#      ficava longe da data. Keyword "regiao metropolitana/ba," adicionada.
 # ===========================================================================
 
 import json
@@ -650,6 +701,11 @@ KEYWORDS_MOVIMENTACAO_PROCESSUAL = [
     "publique-se. intime-se",
     "salvador (ba),",
     "salvador, ba,",
+    # [v8.2.5] Fecho padrão dos atos do PJe/TJBA: "SALVADOR - REGIÃO
+    # METROPOLITANA/BA, 17 de setembro de 2026". A data vem logo depois; sem
+    # esta keyword, uma sentença cujo cabeçalho ("SENTENÇA") fica a mais de 300
+    # caracteres da data não era vista (PDF real 0014528-66.1996.8.05.0001).
+    "regiao metropolitana/ba,",
     "data da intimacao",
     "encaminhado para intimacao no portal eletronico",
 ]
@@ -983,6 +1039,13 @@ def extract_penhora(text):
         # nenhum PDF até agora, então não foi incluída.
         "resultou integralmente exitosa",
         "intimada da penhora realizada via",
+        # --- NOVO (v8.2.5) --- [FIX penhora — PDF real 0014528-66.1996.8.05.0001]
+        # Código de resposta do próprio SISBAJUD no "Detalhamento da ordem judicial
+        # de bloqueio de valores": "(01) Cumprida integralmente". O pdfplumber
+        # separa "Cumprida" de "integralmente" (layout em colunas), por isso a
+        # keyword usa só o código + "cumprida". As respostas negativas do mesmo
+        # relatório usam outros códigos ("(02) Réu/executado sem saldo positivo").
+        "(01) cumprida",
     ]
     
     KEYWORDS_BACENJUD_NEGATIVO = [
@@ -1015,8 +1078,17 @@ def extract_penhora(text):
         "insercao de restricao veicular",
         "bloqueio renajud",
         "restricao renajud",
-        "penhora de veiculo",
+        # [v8.2.5] "penhora de veiculo" SAIU daqui: aparece no PEDIDO do Município
+        # ("vem requerer a penhora de veículo ... via RENAJUD") e fazia um pedido
+        # virar "bloqueio renajud ativo". Foi para KEYWORDS_RENAJUD_SOLICITADO.
+        # "auto de penhora de veiculo" (ato consumado) continua aqui.
         "auto de penhora de veiculo",
+    ]
+    # [v8.2.5] RENAJUD pedido/deferido, sem resultado nos autos.
+    KEYWORDS_RENAJUD_SOLICITADO = [
+        "penhora de veiculo",
+        "via sistema renajud",
+        "pelo sistema renajud",
     ]
     KEYWORDS_RENAJUD_NEGATIVO = [
         "renajud sem exito",
@@ -1121,6 +1193,11 @@ def extract_penhora(text):
 
     if any(normalizar(k) in text_norm for k in KEYWORDS_BACENJUD_SOLICITADO):
         return "sisbajud/bacenjud solicitado (resultado desconhecido)"
+
+    # [v8.2.5] Só depois de todos os resultados efetivos: um pedido de RENAJUD
+    # não pode esconder um bloqueio confirmado de outro tipo.
+    if any(normalizar(k) in text_norm for k in KEYWORDS_RENAJUD_SOLICITADO):
+        return "renajud solicitado (resultado desconhecido)"
 
     if any(normalizar(k) in text_norm for k in KEYWORDS_TENTATIVA_PENHORA):
         return "tentativa de penhora (sem resultado)"
@@ -1478,6 +1555,72 @@ def _carregar_exequentes(caminho=None, cnpjs_env=None):
 EXEQUENTES = _carregar_exequentes()
 _CNPJS_EXEQUENTE = set(EXEQUENTES)    # usado por _extrair_cpf_cnpj
 
+
+# ---------------------------------------------------------------------------
+# [v8.2.4] Alerta de polos — ver item 18 do cabeçalho.
+#
+# O Agente 1 NÃO troca os polos: só sinaliza. Quando o EXECUTADO extraído é um
+# ente cadastrado como exequente (exequentes.json), há duas leituras possíveis
+# e o Agente 1 não tem como escolher entre elas:
+#   (a) o PJe registrou os polos invertidos (visto no processo real
+#       0014528-66.1996.8.05.0001: o cabeçalho diz EXECUTADO: MUNICÍPIO, mas a
+#       sentença diz que o Município é quem executa);
+#   (b) o Município é de fato o devedor (ex.: contribuinte cobrando honorários).
+# Quem decide é o humano / Agente 2.
+# ---------------------------------------------------------------------------
+_RE_ENTE_PUBLICO = re.compile(
+    r"\b(?:municipio|municipalidade|prefeitura|fazenda publica)\b"
+)
+_RE_PREFIXO_ENTE = re.compile(
+    r"^\s*(?:fazenda publica\s+(?:d[oa]\s+)?)?(?:municipio|prefeitura(?:\s+municipal)?)"
+    r"\s+(?:d[eoa]s?\s+)?"
+)
+
+
+def _localidades_exequentes(exequentes=None):
+    """
+    Nomes das localidades dos exequentes cadastrados, normalizados
+    ("Município de Salvador" -> "salvador"). Usados para reconhecer o ente
+    público em qualquer grafia ("PREFEITURA MUNICIPAL DE SALVADOR",
+    "Município do Salvador", "FAZENDA PÚBLICA DO MUNICÍPIO DE SALVADOR").
+    """
+    locais = set()
+    for dados in (exequentes if exequentes is not None else EXEQUENTES).values():
+        nome = normalizar(dados.get("nome") or "").strip()
+        local = _RE_PREFIXO_ENTE.sub("", nome).strip()
+        if len(local) >= 3:
+            locais.add(local)
+    return locais
+
+
+def _e_ente_exequente(nome, exequentes=None):
+    """True se `nome` é um ente público cadastrado em exequentes.json."""
+    n = re.sub(r"\s+", " ", normalizar(nome or ""))
+    if not n or not _RE_ENTE_PUBLICO.search(n):
+        return False
+    return any(re.search(rf"\b{re.escape(local)}\b", n)
+               for local in _localidades_exequentes(exequentes))
+
+
+def _alertas_partes(entidades, exequentes=None):
+    """
+    Lista de alertas sobre as partes extraídas (vazia se nada a revisar).
+    Cada alerta: {"codigo": ..., "mensagem": ...}. Não altera os nomes.
+    """
+    ent = entidades or {}
+    alertas = []
+    if _e_ente_exequente(ent.get("nome_executado"), exequentes):
+        alertas.append({
+            "codigo": "POLOS_A_REVISAR",
+            "mensagem": (
+                "O ente exequente cadastrado aparece como EXECUTADO "
+                f"('{ent.get('nome_executado')}'). O PJe pode ter registrado os "
+                "polos invertidos, ou o Município é de fato o devedor neste "
+                "processo. Conferir antes de priorizar a cobrança."
+            ),
+        })
+    return alertas
+
 # Token candidato: começa e termina em dígito, só admite . - / no meio
 # (não cruza espaços, para não fundir "CEP 40230731 - 713", telefone, etc.).
 _RE_CANDIDATO = re.compile(r"\d[\d./-]{9,16}\d")
@@ -1555,38 +1698,75 @@ def _extrair_cpf_cnpj(text):
     return _fmt_cnpj(dig) if tipo == "cnpj" else _fmt_cpf(dig)
  
 
-def _extrair_nome_executado(text):
-    """Extrae el nombre/razón social del executado."""
-    _PATRONES = [
-        r"executad[oa]\s*:\s*([^\n\r]{3,80})",
-        r"r[eé]u\s*:\s*([^\n\r]{3,80})",
-        r"contribuinte\s*:\s*([^\n\r]{3,80})",
-        r"nome[\/\s]?raz[aã]o social\s*:\s*([^\n\r]{3,80})",
-    ]
-    for pat in _PATRONES:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            nome = m.group(1).strip().rstrip(".,;")
-            if len(nome) >= 4 and not nome.replace(" ", "").isdigit():
-                return nome[:100]
+# [v8.2.4] Nomes das partes — ver item 17 do cabeçalho.
+#
+# Rótulos de parte que podem aparecer ENCAIXADOS no valor (cabeçalho do PJe:
+# "EXEQUENTE: AUTOR: EMPRESA X") ou logo depois dele na mesma linha
+# ("Exequente: MUNICÍPIO X Executado: FULANO"). Usados para limpar o prefixo e
+# para cortar o valor no próximo rótulo.
+_ROTULOS_PARTE = (
+    r"exequente|executad[oa]|autor[a]?|r[eé]u|requerente|requerid[oa]|"
+    r"credor|devedor|contribuinte|embargante|embargad[oa]|apelante|apelad[oa]|"
+    r"reclamante|reclamad[oa]|impetrante|impetrad[oa]"
+)
+_RE_PREFIXO_ROTULO = re.compile(rf"^\s*(?:(?:{_ROTULOS_PARTE})\s*:\s*)+", re.IGNORECASE)
+# Corte do valor: próximo rótulo de parte, rótulo de advogado/representante,
+# ou dados de documento (CPF/CNPJ/OAB) que costumam vir colados ao nome.
+_RE_CORTE_NOME = re.compile(
+    rf"\s*(?:[,;\-–(]\s*)?(?:\b(?:{_ROTULOS_PARTE}|advogad[oa]s?|representantes?|"
+    r"classe|assunto|processo|valor da causa)\s*(?:\(s\))?\s*:|"
+    r"\b(?:cpf|cnpj|cgc|inscrit[oa]|portador[a]?|oab)\b).*$",
+    re.IGNORECASE,
+)
+
+
+def _limpar_nome_parte(bruto):
+    """
+    Limpa o valor capturado depois de um rótulo de parte. Devolve None quando o
+    que sobrou não é um nome (vazio, só rótulo, só dígitos, curto demais).
+    """
+    nome = (bruto or "").strip()
+    nome = _RE_PREFIXO_ROTULO.sub("", nome)              # "AUTOR: X" -> "X"
+    nome = _RE_CORTE_NOME.sub("", nome)                   # "X Advogado(s): ..." -> "X"
+    nome = nome.strip().lstrip("'\"“”‘’").strip().rstrip(".,;:-– ")
+    if len(nome) < 4 or nome.replace(" ", "").isdigit():
+        return None
+    if _RE_PREFIXO_ROTULO.match(nome + ":"):
+        return None                                       # sobrou só um rótulo
+    return nome
+
+
+def _buscar_nome_parte(text, rotulos, limite):
+    """
+    Procura, na ordem de `rotulos`, o primeiro valor VÁLIDO depois de
+    "<rótulo>:" — percorrendo TODAS as ocorrências, não só a primeira.
+
+    O valor tem de estar NA MESMA LINHA do rótulo. Antes o padrão usava \\s*
+    depois dos dois-pontos, que atravessa a quebra de linha: em formulários com
+    rótulos empilhados ("Exequente:\\nExecutado:\\n<texto>") o exequente saía
+    "Executado:" e o executado saía a linha de texto seguinte.
+    """
+    for rotulo in rotulos:
+        padrao = re.compile(rf"\b{rotulo}[ \t]*:[ \t]*([^\n\r]{{3,{limite + 60}}})", re.IGNORECASE)
+        for m in padrao.finditer(text or ""):
+            nome = _limpar_nome_parte(m.group(1))
+            if nome:
+                return nome[:limite]
     return None
+
+
+def _extrair_nome_executado(text):
+    """Extrai o nome/razão social do executado (ver _buscar_nome_parte)."""
+    return _buscar_nome_parte(
+        text,
+        [r"executad[oa]", r"r[eé]u", r"contribuinte", r"nome[\/\s]?raz[aã]o social"],
+        limite=100,
+    )
 
 
 def _extrair_nome_exequente(text):
-    """Extrae el nombre del exequente. Limpia comillas OCR al inicio."""
-    _PATRONES = [
-        r"exequente\s*:\s*([^\n\r]{3,80})",
-        r"credor\s*:\s*([^\n\r]{3,80})",
-        r"autor\s*:\s*([^\n\r]{3,80})",
-    ]
-    for pat in _PATRONES:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            nome = m.group(1).strip().rstrip(".,;")
-            nome = nome.lstrip("'\"\u201c\u201d\u2018\u2019").strip()
-            if len(nome) >= 4:
-                return nome[:80]
-    return None
+    """Extrai o nome do exequente (ver _buscar_nome_parte)."""
+    return _buscar_nome_parte(text, [r"exequente", r"credor", r"autor"], limite=80)
 
 
 
@@ -1695,6 +1875,13 @@ def _dedup_por_exercicio(cdas):
     return list(vigentes.values())
  
  
+# [v8.2.5] Valor monetário no formato brasileiro, COM centavos: "1.234,56",
+# "6019,02". Exigir ",dd" evita capturar uma vírgula solta ("R$ ,") e também
+# datas/anos de tabela que vêm logo depois do rótulo ("valor atualizado
+# 27/08/2025 ..." virava "R$ 27").
+_NUM = r"(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?!\d)"
+
+
 def _extrair_valor(text):
     """
     Devuelve (valor_original, valor_atualizado) como 'R$ X.XXX,XX' o None.
@@ -1718,30 +1905,35 @@ def _extrair_valor(text):
             valor_original = f"R$ {_float_to_brl(sum(origs))}"
  
     # --- Fallbacks para documentos SEM certidões (outros formatos) ---
+    # [v8.2.5] O número precisa ser um valor em reais com centavos (_NUM).
+    # Antes era ([\d.,]+), que aceitava uma vírgula sozinha: "valor atualizado ,"
+    # virava "R$ ," (PDF real 0014528-66.1996.8.05.0001) e o Agente 2 priorizava
+    # em cima disso. Com o formato exigido, o re.search segue até a 1ª ocorrência
+    # válida — ou devolve None, que é melhor do que um valor inventado.
     if valor_original is None:
-        for pat in [r"valor origin[aá]ri[oa]\s*[r\$:\s]+([\d.,]+)",
-                    r"valor original\s*[r\$:\s]+([\d.,]+)",
-                    r"vl\.?\s*original\s*[r\$:\s]+([\d.,]+)"]:
+        for pat in [rf"valor origin[aá]ri[oa]\s*[r\$:\s]+({_NUM})",
+                    rf"valor original\s*[r\$:\s]+({_NUM})",
+                    rf"vl\.?\s*original\s*[r\$:\s]+({_NUM})"]:
             m = re.search(pat, tn)
             if m:
                 valor_original = f"R$ {m.group(1).strip()}"
                 break
  
     if valor_atualizado is None:
-        for pat in [r"valor total da divida parcelada\s*[:\s]*([\d.,]+)",
-                    r"total a pagar\s*[:\s]*([\d.,]+)",
-                    r"valor atualizado\s*[:\s]*([\d.,]+)",
-                    r"valor atual\s*[:\s]*([\d.,]+)",
-                    r"total em r\$\s*[:\s]*([\d.,]+)",
-                    r"vl\.?\s*corrigido\s*[:\s]*([\d.,]+)",
-                    r"total\s*geral\s*[-:>\s]*([\d.,]+)"]:
+        for pat in [rf"valor total da divida parcelada\s*[:\s]*({_NUM})",
+                    rf"total a pagar\s*[:\s]*({_NUM})",
+                    rf"valor atualizado\s*[:\s]*({_NUM})",
+                    rf"valor atual\s*[:\s]*({_NUM})",
+                    rf"total em r\$\s*[:\s]*({_NUM})",
+                    rf"vl\.?\s*corrigido\s*[:\s]*({_NUM})",
+                    rf"total\s*geral\s*[-:>\s]*({_NUM})"]:
             m = re.search(pat, tn)
             if m:
                 valor_atualizado = f"R$ {m.group(1).strip()}"
                 break
  
     if valor_original is None:
-        m = re.search(r"r\$\s*([\d.,]+)", tn)
+        m = re.search(rf"r\$\s*({_NUM})", tn)
         if m:
             valor_original = f"R$ {m.group(1).strip()}"
  
@@ -2919,6 +3111,8 @@ def generate_prompts(input_dir):
             print(f"  CPF/CNPJ       : {_ent.get('cpf_cnpj') or '—'}")
             print(f"  Executado      : {_ent.get('nome_executado') or '—'}")
             print(f"  Valor orig.    : {_ent.get('valor_original') or '—'}")
+            for _al in (_alertas_partes(_ent) if entidades is not None else []):
+                print(f"  ⚠ {_al['codigo']}: conferir polos (executado = ente exequente)")
             print(f"{'='*60}")
 
             prompts.append((
@@ -3013,6 +3207,8 @@ def process_prompts_to_excel(prompts, output_excel):
             "Valor original"                : ent.get("valor_original") or "",
             "Valor atualizado"              : ent.get("valor_atualizado") or "",
             "Vara"                          : ent.get("vara") or "",
+            # [v8.2.4] alertas para revisão humana (ver _alertas_partes)
+            "Alertas"                       : " | ".join(a["mensagem"] for a in _alertas_partes(ent)) if entidades else "",
         })
 
     df = pd.DataFrame(resultados)
@@ -3073,7 +3269,7 @@ def process_prompts_to_excel(prompts, output_excel):
             "CPF/CNPJ": 20, "Nome executado": 30, "Nome exequente": 30,
             "Tipo de tributo": 20, "Exercício": 12, "Número CDA": 22,
             "Data inscrição dívida ativa": 16, "Valor original": 16,
-            "Valor atualizado": 16, "Vara": 28,
+            "Valor atualizado": 16, "Vara": 28, "Alertas": 50,
         }
         for col_idx, col_name in enumerate(df.columns, start=1):
             ws.column_dimensions[get_column_letter(col_idx)].width = anchos.get(col_name, 18)
@@ -3136,7 +3332,7 @@ def exportar_json_agente2(prompts, output_json, total_ignorados=None):
     import json
     from datetime import datetime as _dt
 
-    VERSION_AGENTE1 = "8.2.3"
+    VERSION_AGENTE1 = "8.2.5"
 
     def _nulo(val):
         if val is None:
@@ -3230,6 +3426,16 @@ def exportar_json_agente2(prompts, output_json, total_ignorados=None):
             n_merged += 1
             if pr.get("conflitos"):
                 n_conflitos += len(pr["conflitos"])
+
+        # [v8.2.4] Alertas para revisão humana (não alteram nenhum valor).
+        # DERIVADOS das entidades FINAIS (depois do merge), como dias_desde —
+        # assim o alerta nunca contradiz os nomes que saem no JSON.
+        # None = entidades nunca extraídas; [] = nada a revisar.
+        _ent_final = pr.get("entidades") or {}
+        _tem_ent = entidades is not None or any(v is not None for v in _ent_final.values())
+        pr["alertas"] = _alertas_partes(_ent_final) if _tem_ent else None
+        for _al in (pr["alertas"] or []):
+            logging.warning(f"  {pdf_file}: ALERTA {_al['codigo']} — {_al['mensagem']}")
 
         processos.append(pr)
 
